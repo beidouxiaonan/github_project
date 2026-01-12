@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>欢迎致辞 - 交互演示</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #020205; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        #hint { position: absolute; bottom: 30px; width: 100%; text-align: center; color: #d4af37; font-size: 18px; text-shadow: 0 0 10px rgba(212,175,55,0.8); }
+        #status-info { position: absolute; top: 10px; left: 10px; color: #666; font-size: 12px; }
+        #webcam-wrapper { position: absolute; bottom: 20px; right: 20px; width: 120px; height: 90px; border: 1px solid #d4af37; border-radius: 4px; overflow: hidden; background: #000; }
+        #webcam { width: 100%; height: 100%; transform: scaleX(-1); object-fit: cover; }
+        #loader { 
+            position: absolute; width: 100%; height: 100%; background: #020205; 
+            z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #d4af37; 
+        }
+        .spinner { width: 40px; height: 40px; border: 3px solid rgba(212,175,55,0.3); border-top: 3px solid #d4af37; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="loader">
+        <div class="spinner"></div>
+        <div id="load-text">正在初始化三维引擎...</div>
+    </div>
+    <div id="status-info">备用键：1-散开 | 2-文字 | 3-比心</div>
+    <div id="canvas-container"></div>
+    <div id="ui-layer">
+        <div id="hint">🖐️ 伸掌：致欢迎辞 | ✊ 握拳：爱心互动 | ✌️ 耶：粒子散开</div>
+    </div>
+    <div id="webcam-wrapper">
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        const P_COUNT = 3000; 
+        let scene, camera, renderer, composer, handLandmarker, video;
+        let particles = [];
+        let state = 'SCATTER'; 
+        const pointsText = [];
+        const pointsHeart = [];
+        const loadText = document.getElementById('load-text');
+
+        async function init() {
+            try {
+                // 1. 三维场景
+                scene = new THREE.Scene();
+                camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+                camera.position.z = 60;
+
+                renderer = new THREE.WebGLRenderer({ antialias: false });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+                document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+                const renderScene = new RenderPass(scene, camera);
+                const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.0, 0.4, 0.85);
+                composer = new EffectComposer(renderer);
+                composer.addPass(renderScene);
+                composer.addPass(bloomPass);
+
+                // 2. 生成文字和心形点位
+                loadText.innerText = "正在排布欢迎语粒子...";
+                await generateTextPoints("欢迎各位老师莅临听课");
+                generateHeartPoints();
+
+                // 3. 创建粒子
+                const geo = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0,0,0], 3));
+                const matGold = new THREE.PointsMaterial({ color: 0xffd700, size: 0.4, transparent: true, blending: THREE.AdditiveBlending });
+                const matRed = new THREE.PointsMaterial({ color: 0xff3300, size: 0.4, transparent: true, blending: THREE.AdditiveBlending });
+
+                for (let i = 0; i < P_COUNT; i++) {
+                    const material = (i % 6 === 0) ? matRed : matGold;
+                    const mesh = new THREE.Points(geo, material);
+                    scene.add(mesh);
+                    particles.push({
+                        mesh: mesh,
+                        scatter: new THREE.Vector3((Math.random()-0.5)*120, (Math.random()-0.5)*100, (Math.random()-0.5)*60),
+                        speed: 0.04 + Math.random() * 0.04
+                    });
+                }
+
+                // 4. 初始化手势（带超时容错）
+                loadText.innerText = "正在开启摄像头手势感应...";
+                await initHandTracking().catch(e => {
+                    console.error("手势感应启动失败，切换至键盘控制模式", e);
+                    alert("摄像头开启失败。您可以使用键盘按键 1, 2, 3 进行演示。");
+                });
+
+                document.getElementById('loader').style.display = 'none';
+                setupControls();
+                animate();
+            } catch (err) {
+                loadText.innerText = "加载失败，请检查网络或更换浏览器";
+                console.error(err);
+            }
+        }
+
+        async function generateTextPoints(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 1000; canvas.height = 200;
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 70px "Microsoft YaHei", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, 500, 100);
+
+            const data = ctx.getImageData(0, 0, 1000, 200).data;
+            for (let y = 0; y < 200; y += 3) {
+                for (let x = 0; x < 1000; x += 3) {
+                    if (data[(y * 1000 + x) * 4] > 128) {
+                        pointsText.push(new THREE.Vector3((x - 500) * 0.14, -(y - 100) * 0.14, 0));
+                    }
+                }
+            }
+        }
+
+        function generateHeartPoints() {
+            for (let i = 0; i < P_COUNT; i++) {
+                const t = Math.random() * Math.PI * 2;
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                pointsHeart.push(new THREE.Vector3(x * 0.9, y * 0.9 + 5, (Math.random()-0.5)*8));
+            }
+        }
+
+        async function initHandTracking() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { 
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "GPU" 
+                },
+                runningMode: "VIDEO", numHands: 1
+            });
+            video = document.getElementById('webcam');
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+            video.srcObject = stream;
+        }
+
+        function setupControls() {
+            window.addEventListener('keydown', (e) => {
+                if (e.key === '1') state = 'SCATTER';
+                if (e.key === '2') state = 'TEXT';
+                if (e.key === '3') state = 'HEART';
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (video && video.readyState >= 2) {
+                const results = handLandmarker.detectForVideo(video, performance.now());
+                if (results.landmarks && results.landmarks.length > 0) {
+                    const lm = results.landmarks[0];
+                    const extended = [8, 12, 16, 20].filter(id => lm[id].y < lm[id-2].y).length;
+                    state = extended <= 1 ? 'HEART' : (extended >= 4 ? 'TEXT' : 'SCATTER');
+                }
+            }
+
+            const time = Date.now() * 0.002;
+            particles.forEach((p, i) => {
+                let targetPos;
+                if (state === 'TEXT') {
+                    targetPos = pointsText[i % pointsText.length];
+                } else if (state === 'HEART') {
+                    targetPos = pointsHeart[i % pointsHeart.length];
+                } else {
+                    targetPos = p.scatter;
+                }
+                p.mesh.position.lerp(targetPos, 0.07);
+                // 呼吸效果
+                if(state !== 'SCATTER') p.mesh.position.y += Math.sin(time + i*0.1) * 0.05;
+            });
+
+            composer.render();
+        }
+
+        init();
+    </script>
+</body>
+</html>
